@@ -1,18 +1,29 @@
+mod account;
 mod api;
 mod app;
 mod backend;
+mod media;
 mod model;
 mod realtime;
 mod tray;
-mod account;
 
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
+
+    let rt = runtime.handle().clone();
 
     let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
     let (update_tx, update_rx) = std::sync::mpsc::channel();
@@ -36,7 +47,7 @@ fn main() -> eframe::Result<()> {
         "Plainwire",
         options,
         Box::new(move |cc| {
-            let mut app = app::App::new(backend, update_rx, ui_repaint, &cc.egui_ctx);
+            let mut app = app::App::new(rt.clone(), backend, update_rx, ui_repaint, &cc.egui_ctx);
             app.init_tray();
             Ok(Box::new(app))
         }),

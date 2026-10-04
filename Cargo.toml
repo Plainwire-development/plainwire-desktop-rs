@@ -5,11 +5,16 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+bytes = "1.12.1"
 dirs = "6.0.0"
 eframe = "0.36.2"
 futures-util = "0.3.34"
 image = "0.25.2"
 reqwest = { version = "0.13.5", features = ["json", "cookies", "query", "multipart"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webrtc = "0.13.0"
+cpal = "0.16.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tray-icon = "0.16.0"
