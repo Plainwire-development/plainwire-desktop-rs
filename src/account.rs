@@ -58,7 +58,6 @@ impl AccountStore {
         let path = Self::path();
         if let Ok(data) = fs::read_to_string(&path) {
             if let Ok(mut store) = serde_json::from_str::<AccountStore>(&data) {
-
                 let len = store.accounts.len();
                 if store.selected.is_some_and(|i| i >= len) {
                     store.selected = None;
@@ -82,9 +81,7 @@ impl AccountStore {
     }
 
     pub fn index_of(&self, base: &str, username: &str) -> Option<usize> {
-        self.accounts
-            .iter()
-            .position(|a| a.matches(base, username))
+        self.accounts.iter().position(|a| a.matches(base, username))
     }
 
     pub fn by_user_id(&self, user_id: i64) -> Option<&Account> {
@@ -98,7 +95,6 @@ impl AccountStore {
             .position(|a| a.matches(&account.base, &account.username))
         {
             Some(index) => {
-
                 if account.token.is_none() {
                     account.token = self.accounts[index].token.clone();
                     account.csrf = self.accounts[index].csrf.clone();
@@ -132,7 +128,10 @@ impl AccountStore {
     }
 
     pub fn preferred(&self) -> Option<usize> {
-        self.selected
-            .or(if self.accounts.len() == 1 { Some(0) } else { None })
+        self.selected.or(if self.accounts.len() == 1 {
+            Some(0)
+        } else {
+            None
+        })
     }
 }

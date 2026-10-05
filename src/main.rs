@@ -10,13 +10,10 @@ mod tray;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-
     if rustls::crypto::ring::default_provider()
         .install_default()
         .is_err()
-    {
-
-    }
+    {}
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

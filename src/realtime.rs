@@ -5,13 +5,15 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, sleep};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::HeaderValue;
 use tokio_tungstenite::tungstenite::http::Uri;
+use tokio_tungstenite::tungstenite::http::header::HeaderValue;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::api::{Auth, origin, ws_url};
 use crate::backend::{Repainter, Update};
-use crate::model::{CallInvite, Message, Participant, RoomId, Scope};
+use crate::model::{
+    CallInvite, Message, Notification, Participant, PresenceSnapshot, RoomId, Scope,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Sub {
@@ -20,7 +22,6 @@ pub struct Sub {
 }
 
 pub enum RtCommand {
-
     Text(String),
 
     JoinRoom(RoomId),
@@ -35,11 +36,22 @@ pub enum RtCommand {
         signal: Value,
     },
 
-    Activity { active: bool, level_db: i32 },
-    RingCall { conversation_id: i64 },
-    AcceptCall { conversation_id: i64 },
-    DeclineCall { conversation_id: i64 },
-    CancelCall { conversation_id: i64 },
+    Activity {
+        active: bool,
+        level_db: i32,
+    },
+    RingCall {
+        conversation_id: i64,
+    },
+    AcceptCall {
+        conversation_id: i64,
+    },
+    DeclineCall {
+        conversation_id: i64,
+    },
+    CancelCall {
+        conversation_id: i64,
+    },
 }
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -202,7 +214,10 @@ fn handle_text(text: &str, updates: &Sender<Update>, repaint: &Repainter) {
         "voice_activity" => {
             if let Some(room) = event_room(crate::model::RoomKind::Voice, &value) {
                 let user_id = value.get("user_id").and_then(Value::as_i64).unwrap_or(0);
-                let active = value.get("active").and_then(Value::as_bool).unwrap_or(false);
+                let active = value
+                    .get("active")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let _ = updates.send(Update::RoomActivity {
                     room,
                     user_id,
@@ -212,7 +227,10 @@ fn handle_text(text: &str, updates: &Sender<Update>, repaint: &Repainter) {
         }
         "voice_signal" => {
             if let Some(room) = event_room(crate::model::RoomKind::Voice, &value) {
-                let from = value.get("from_user_id").and_then(Value::as_i64).unwrap_or(0);
+                let from = value
+                    .get("from_user_id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 if let Some(signal) = value.get("signal").cloned() {
                     let _ = updates.send(Update::RoomSignal {
                         room,
@@ -255,7 +273,10 @@ fn handle_text(text: &str, updates: &Sender<Update>, repaint: &Repainter) {
         "call_activity" => {
             if let Some(room) = event_room(crate::model::RoomKind::Call, &value) {
                 let user_id = value.get("user_id").and_then(Value::as_i64).unwrap_or(0);
-                let active = value.get("active").and_then(Value::as_bool).unwrap_or(false);
+                let active = value
+                    .get("active")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let _ = updates.send(Update::RoomActivity {
                     room,
                     user_id,
@@ -265,7 +286,10 @@ fn handle_text(text: &str, updates: &Sender<Update>, repaint: &Repainter) {
         }
         "call_signal" => {
             if let Some(room) = event_room(crate::model::RoomKind::Call, &value) {
-                let from = value.get("from_user_id").and_then(Value::as_i64).unwrap_or(0);
+                let from = value
+                    .get("from_user_id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 if let Some(signal) = value.get("signal").cloned() {
                     let _ = updates.send(Update::RoomSignal {
                         room,
@@ -342,6 +366,59 @@ fn handle_text(text: &str, updates: &Sender<Update>, repaint: &Repainter) {
             }
         }
 
+        "notification" => {
+            if let Some(event) = value.get("event").cloned() {
+                if let Ok(notification) = serde_json::from_value::<Notification>(event) {
+                    let _ = updates.send(Update::Notification(notification));
+                }
+            }
+        }
+        "presence_online" => {
+            let user_id = value.get("user_id").and_then(Value::as_i64).unwrap_or(0);
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let client_platform = value
+                .get("client_platform")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let _ = updates.send(Update::PresenceOnline {
+                user_id,
+                status,
+                client_platform,
+            });
+        }
+        "presence_offline" => {
+            let user_id = value.get("user_id").and_then(Value::as_i64).unwrap_or(0);
+            let _ = updates.send(Update::PresenceOffline { user_id });
+        }
+        "presence_status" => {
+            let user_id = value.get("user_id").and_then(Value::as_i64).unwrap_or(0);
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let client_platform = value
+                .get("client_platform")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let _ = updates.send(Update::PresenceStatus {
+                user_id,
+                status,
+                client_platform,
+            });
+        }
+        "presence_state" => {
+            if let Ok(snapshot) = serde_json::from_value::<PresenceSnapshot>(value.clone()) {
+                let _ = updates.send(Update::PresenceState(snapshot));
+            }
+        }
+
         "error" => {
             let message = value
                 .get("error")
@@ -358,73 +435,61 @@ fn handle_text(text: &str, updates: &Sender<Update>, repaint: &Repainter) {
 fn frame_for(command: &RtCommand) -> Option<String> {
     match command {
         RtCommand::Text(text) => Some(text.clone()),
-        RtCommand::JoinRoom(room) => Some(
-            match room.kind {
-                crate::model::RoomKind::Voice => {
-                    json!({ "type": "voice_join", "channel_id": room.id }).to_string()
-                }
-                crate::model::RoomKind::Call => {
-                    json!({ "type": "call_join", "conversation_id": room.id }).to_string()
-                }
-            },
-        ),
-        RtCommand::LeaveRoom(room) => Some(
-            match room.kind {
-                crate::model::RoomKind::Voice => {
-                    json!({ "type": "voice_leave" }).to_string()
-                }
-                crate::model::RoomKind::Call => {
-                    json!({ "type": "call_leave" }).to_string()
-                }
-            },
-        ),
-        RtCommand::PatchRoom(patch) => Some(
-            match patch.kind {
-                crate::model::RoomKind::Voice => {
-                    json!({ "type": "voice_state", "patch": patch.wire() }).to_string()
-                }
-                crate::model::RoomKind::Call => {
-                    json!({ "type": "call_state", "patch": patch.wire() }).to_string()
-                }
-            },
-        ),
+        RtCommand::JoinRoom(room) => Some(match room.kind {
+            crate::model::RoomKind::Voice => {
+                json!({ "type": "voice_join", "channel_id": room.id }).to_string()
+            }
+            crate::model::RoomKind::Call => {
+                json!({ "type": "call_join", "conversation_id": room.id }).to_string()
+            }
+        }),
+        RtCommand::LeaveRoom(room) => Some(match room.kind {
+            crate::model::RoomKind::Voice => json!({ "type": "voice_leave" }).to_string(),
+            crate::model::RoomKind::Call => json!({ "type": "call_leave" }).to_string(),
+        }),
+        RtCommand::PatchRoom(patch) => Some(match patch.kind {
+            crate::model::RoomKind::Voice => {
+                json!({ "type": "voice_state", "patch": patch.wire() }).to_string()
+            }
+            crate::model::RoomKind::Call => {
+                json!({ "type": "call_state", "patch": patch.wire() }).to_string()
+            }
+        }),
         RtCommand::Signal {
             room,
             to_user_id,
             signal,
-        } => Some(
-            match room.kind {
-                crate::model::RoomKind::Voice => json!({
-                    "type": "voice_signal",
-                    "channel_id": room.id,
-                    "to_user_id": to_user_id,
-                    "signal": signal,
-                })
-                .to_string(),
-                crate::model::RoomKind::Call => json!({
-                    "type": "call_signal",
-                    "conversation_id": room.id,
-                    "to_user_id": to_user_id,
-                    "signal": signal,
-                })
-                .to_string(),
-            },
-        ),
+        } => Some(match room.kind {
+            crate::model::RoomKind::Voice => json!({
+                "type": "voice_signal",
+                "channel_id": room.id,
+                "to_user_id": to_user_id,
+                "signal": signal,
+            })
+            .to_string(),
+            crate::model::RoomKind::Call => json!({
+                "type": "call_signal",
+                "conversation_id": room.id,
+                "to_user_id": to_user_id,
+                "signal": signal,
+            })
+            .to_string(),
+        }),
         RtCommand::Activity { active, level_db } => Some(
             json!({ "type": "voice_activity", "active": active, "level_db": level_db }).to_string(),
         ),
-        RtCommand::RingCall { conversation_id } => Some(
-            json!({ "type": "call_ring", "conversation_id": conversation_id }).to_string(),
-        ),
-        RtCommand::AcceptCall { conversation_id } => Some(
-            json!({ "type": "call_accept", "conversation_id": conversation_id }).to_string(),
-        ),
-        RtCommand::DeclineCall { conversation_id } => Some(
-            json!({ "type": "call_decline", "conversation_id": conversation_id }).to_string(),
-        ),
-        RtCommand::CancelCall { conversation_id } => Some(
-            json!({ "type": "call_cancel", "conversation_id": conversation_id }).to_string(),
-        ),
+        RtCommand::RingCall { conversation_id } => {
+            Some(json!({ "type": "call_ring", "conversation_id": conversation_id }).to_string())
+        }
+        RtCommand::AcceptCall { conversation_id } => {
+            Some(json!({ "type": "call_accept", "conversation_id": conversation_id }).to_string())
+        }
+        RtCommand::DeclineCall { conversation_id } => {
+            Some(json!({ "type": "call_decline", "conversation_id": conversation_id }).to_string())
+        }
+        RtCommand::CancelCall { conversation_id } => {
+            Some(json!({ "type": "call_cancel", "conversation_id": conversation_id }).to_string())
+        }
     }
 }
 
@@ -446,7 +511,9 @@ pub async fn run(
                 let (mut write, mut read) = socket.split();
                 let initial = *subs.borrow();
                 if let Some(sub) = initial {
-                    let _ = write.send(WsMessage::Text(subscribe_text(sub).into())).await;
+                    let _ = write
+                        .send(WsMessage::Text(subscribe_text(sub).into()))
+                        .await;
                 }
                 loop {
                     tokio::select! {
@@ -523,16 +590,19 @@ mod tests {
                 "{header} must appear exactly once"
             );
         }
-        assert_eq!(
-            request.headers().get("connection").unwrap(),
-            "Upgrade"
-        );
+        assert_eq!(request.headers().get("connection").unwrap(), "Upgrade");
         assert_eq!(request.headers().get("upgrade").unwrap(), "websocket");
         assert_eq!(
             request.headers().get("sec-websocket-version").unwrap(),
             "13"
         );
-        assert!(!request.headers().get("sec-websocket-key").unwrap().is_empty());
+        assert!(
+            !request
+                .headers()
+                .get("sec-websocket-key")
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(request.uri().path(), "/ws");
     }
 
@@ -595,6 +665,11 @@ mod tests {
             Update::CallAccepted { .. } => "CallAccepted",
             Update::CallEnded { .. } => "CallEnded",
             Update::Typing { .. } => "Typing",
+            Update::Notification(_) => "Notification",
+            Update::PresenceOnline { .. } => "PresenceOnline",
+            Update::PresenceOffline { .. } => "PresenceOffline",
+            Update::PresenceStatus { .. } => "PresenceStatus",
+            Update::PresenceState(_) => "PresenceState",
             Update::Realtime(_) => "Realtime",
             Update::LoggedOut => "LoggedOut",
             Update::Error(_) => "Error",
@@ -645,23 +720,22 @@ mod tests {
             json(r#"{"type":"call_cancel","conversation_id":3}"#)
         );
         assert_eq!(
-            json(&frame(&RtCommand::Activity { active: true, level_db: -20 })),
+            json(&frame(&RtCommand::Activity {
+                active: true,
+                level_db: -20
+            })),
             json(r#"{"type":"voice_activity","active":true,"level_db":-20}"#)
         );
     }
 
     #[test]
     fn patches_are_routed_to_the_right_frame() {
-        let voice = RtCommand::PatchRoom(
-            crate::model::RoomPatch::new(RoomKind::Voice).muted(true),
-        );
+        let voice = RtCommand::PatchRoom(crate::model::RoomPatch::new(RoomKind::Voice).muted(true));
         assert_eq!(
             json(&frame_for(&voice).unwrap()),
             json(r#"{"type":"voice_state","patch":{"muted":true}}"#)
         );
-        let call = RtCommand::PatchRoom(
-            crate::model::RoomPatch::new(RoomKind::Call).screen(true),
-        );
+        let call = RtCommand::PatchRoom(crate::model::RoomPatch::new(RoomKind::Call).screen(true));
         assert_eq!(
             json(&frame_for(&call).unwrap()),
             json(r#"{"type":"call_state","patch":{"screen":true}}"#)
@@ -670,7 +744,6 @@ mod tests {
 
     #[test]
     fn signal_payloads_satisfy_pw_ws_signal_ok() {
-
         let signal = json!({"kind":"offer","sdp":{"type":"offer","sdp":"v=0\r\n"}});
         let frame = frame_for(&RtCommand::Signal {
             room: RoomId::voice(4),
@@ -713,10 +786,7 @@ mod tests {
             &Repainter::new(),
         );
         match rx.recv().unwrap() {
-            Update::RoomRoster {
-                room,
-                participants,
-            } => {
+            Update::RoomRoster { room, participants } => {
                 assert_eq!(room, RoomId::voice(12));
                 assert_eq!(participants.len(), 1);
                 assert!(participants[0].muted);
@@ -735,7 +805,11 @@ mod tests {
             &Repainter::new(),
         );
         match rx.recv().unwrap() {
-            Update::RoomPeerJoined { room, user_id, profile } => {
+            Update::RoomPeerJoined {
+                room,
+                user_id,
+                profile,
+            } => {
                 assert_eq!(room, RoomId::voice(12));
                 assert_eq!(user_id, 9);
                 assert_eq!(profile.label(), "Ada");
@@ -811,7 +885,13 @@ mod tests {
         );
         match rx.recv().unwrap() {
             Update::Typing { sub, name, .. } => {
-                assert_eq!(sub, Sub { scope: Scope::Channel, id: 12 });
+                assert_eq!(
+                    sub,
+                    Sub {
+                        scope: Scope::Channel,
+                        id: 12
+                    }
+                );
                 assert_eq!(name, "Ada");
             }
             other => panic!("expected typing, got {}", variant(&other)),

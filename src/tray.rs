@@ -1,6 +1,6 @@
-use tray_icon::{TrayIcon, TrayIconBuilder};
 use std::fs;
 use std::path::PathBuf;
+use tray_icon::{TrayIcon, TrayIconBuilder};
 
 pub struct Tray {
     icon: Option<TrayIcon>,
@@ -9,7 +9,10 @@ pub struct Tray {
 
 impl Tray {
     pub fn new(icon_path: Option<PathBuf>) -> Self {
-        Self { icon: None, icon_path }
+        Self {
+            icon: None,
+            icon_path,
+        }
     }
 
     pub fn build(&mut self, window_title: &str) {

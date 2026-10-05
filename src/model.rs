@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
@@ -344,7 +346,6 @@ impl Profile {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RoomKind {
-
     Voice,
 
     Call,
@@ -403,6 +404,30 @@ pub struct Participant {
     pub reconnecting: bool,
     #[serde(default)]
     pub profile: User,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Notification {
+    #[serde(default)]
+    pub event: String,
+    #[serde(default)]
+    pub from_user_id: i64,
+    #[serde(default)]
+    pub user_id: i64,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PresenceSnapshot {
+    #[serde(default)]
+    pub online: Vec<i64>,
+    #[serde(default)]
+    pub statuses: HashMap<i64, String>,
+    #[serde(default)]
+    pub platforms: HashMap<i64, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -553,10 +578,7 @@ pub fn parse_body(body: &str) -> Vec<BodyPart> {
         parts.push(if is_image {
             BodyPart::Image { alt: label, url }
         } else {
-            BodyPart::Link {
-                text: label,
-                url,
-            }
+            BodyPart::Link { text: label, url }
         });
         index = url_end + 1;
     }
@@ -641,7 +663,10 @@ mod tests {
             parse_body("an ![emoji](:) smile"),
             vec![
                 BodyPart::Text("an ".into()),
-                BodyPart::Image { alt: "emoji".into(), url: ":".into() },
+                BodyPart::Image {
+                    alt: "emoji".into(),
+                    url: ":".into()
+                },
                 BodyPart::Text(" smile".into())
             ]
         );
@@ -681,7 +706,6 @@ mod tests {
 
     #[test]
     fn room_patch_matches_the_hub_whitelist() {
-
         let patch = RoomPatch::new(RoomKind::Voice)
             .muted(true)
             .screen(false)
@@ -702,7 +726,6 @@ mod tests {
 
     #[test]
     fn sync_payload_tolerates_the_real_envelope() {
-
         let raw = r#"{
             "now": 1,
             "since": 0,
@@ -726,7 +749,6 @@ mod tests {
 
     #[test]
     fn profile_response_is_wrapped_not_flat() {
-
         let raw = r#"{"user":{"id":9,"username":"ada","display_name":"Ada",
                      "avatar_url":"/api/media/x","status":"online"},
                      "relationship":{"status":"accepted","incoming":false,
@@ -778,7 +800,6 @@ mod tests {
 
     #[test]
     fn message_reads_reactions_from_the_server_field_name() {
-
         let raw = r#"{"id":1,"user_id":2,"display_name":"Ada","body":"hi",
                      "reactions":[{"emoji":"👍","count":2,"me":true}]}"#;
         let message: Message = serde_json::from_str(raw).unwrap();
@@ -788,16 +809,16 @@ mod tests {
 
     #[test]
     fn participant_roster_decodes() {
-
         let raw = r#"{"channel_id":5,"users":[
             {"user_id":9,"muted":true,"deafened":false,"screen":true,
              "screen_audio":false,"reconnecting":false,
              "profile":{"id":9,"username":"ada","display_name":"Ada"}},
             {"user_id":10,"muted":false,"deafened":false,"screen":false,
              "screen_audio":false,"reconnecting":false,"profile":{}}]}"#;
-        let participants: Vec<Participant> =
-            serde_json::from_value(serde_json::from_str::<serde_json::Value>(raw).unwrap()["users"].clone())
-                .unwrap();
+        let participants: Vec<Participant> = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(raw).unwrap()["users"].clone(),
+        )
+        .unwrap();
         assert_eq!(participants.len(), 2);
         assert!(participants[0].muted);
         assert!(participants[0].screen);

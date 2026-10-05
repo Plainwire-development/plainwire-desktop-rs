@@ -1,5 +1,3 @@
-
-
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -123,13 +121,13 @@ impl Media {
 }
 
 use webrtc::api::APIBuilder;
-use webrtc::interceptor::registry::Registry;
 use webrtc::api::media_engine::MediaEngine;
+use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
-use webrtc::rtp_transceiver::rtp_codec::{RTPCodecType, RTCRtpCodecCapability};
+use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_remote::TrackRemote;
@@ -255,11 +253,17 @@ impl Room {
             if participant.user_id == self.me_id || participant.user_id == 0 {
                 continue;
             }
-            if self.peers.lock().unwrap().contains_key(&participant.user_id) {
+            if self
+                .peers
+                .lock()
+                .unwrap()
+                .contains_key(&participant.user_id)
+            {
                 continue;
             }
             if let Err(error) = self.ensure_peer(participant.user_id).await {
-                self.media.set_link(participant.user_id, PeerLink::Failed(error));
+                self.media
+                    .set_link(participant.user_id, PeerLink::Failed(error));
             }
         }
     }
@@ -281,7 +285,6 @@ impl Room {
         let pc = new_peer_connection(&config).await?;
 
         if offerer {
-
             let make_init = || RTCRtpTransceiverInit {
                 direction: RTCRtpTransceiverDirection::Sendrecv,
                 send_encodings: vec![],
@@ -370,7 +373,6 @@ impl Room {
             let media = media.clone();
             Box::pin(async move {
                 if track.kind() == RTPCodecType::Audio {
-
                     spawn_remote_audio(track);
                     let _ = media;
                 } else {
@@ -419,7 +421,6 @@ impl Room {
 
     async fn on_offer(self: &Arc<Self>, from: i64, signal: &Value) -> Result<(), String> {
         if !self.is_offerer(from) {
-
             (self.sink)(self.id, from, json!({ "kind": "renegotiate" }));
             return Ok(());
         }
@@ -437,8 +438,8 @@ impl Room {
         pc.set_remote_description(
             RTCSessionDescription::offer(sdp).map_err(|e| format!("bad offer: {e}"))?,
         )
-            .await
-            .map_err(|e| format!("set remote offer: {e}"))?;
+        .await
+        .map_err(|e| format!("set remote offer: {e}"))?;
         let answer = pc
             .create_answer(None)
             .await
@@ -468,8 +469,8 @@ impl Room {
         pc.set_remote_description(
             RTCSessionDescription::answer(sdp).map_err(|e| format!("bad answer: {e}"))?,
         )
-            .await
-            .map_err(|e| format!("set remote answer: {e}"))
+        .await
+        .map_err(|e| format!("set remote answer: {e}"))
     }
 
     async fn on_candidate(&self, from: i64, signal: &Value) -> Result<(), String> {
@@ -511,7 +512,9 @@ impl Room {
             return Ok(());
         }
         let pc = self.peer_pc(from)?;
-        pc.restart_ice().await.map_err(|e| format!("restart ice: {e}"))?;
+        pc.restart_ice()
+            .await
+            .map_err(|e| format!("restart ice: {e}"))?;
         self.make_offer(from).await
     }
 
@@ -529,7 +532,10 @@ impl Room {
             Ok((track, stop)) => {
                 self.media.set_capture_error(None);
                 self.media.set_mic_working(true);
-                let mic = Arc::new(MicSource { track, stop: stop.clone() });
+                let mic = Arc::new(MicSource {
+                    track,
+                    stop: stop.clone(),
+                });
                 let pcs: Vec<PeerPc> = self
                     .peers
                     .lock()
@@ -903,8 +909,7 @@ fn spawn_screen_capture(media: Media) -> Result<ScreenSource, String> {
     let display = std::env::var("DISPLAY").unwrap_or_default();
     if display.is_empty() {
         return Err(
-            "screen capture needs a DISPLAY; a Wayland-only session requires portal access"
-                .into(),
+            "screen capture needs a DISPLAY; a Wayland-only session requires portal access".into(),
         );
     }
 
@@ -937,7 +942,10 @@ fn spawn_screen_capture(media: Media) -> Result<ScreenSource, String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("could not start ffmpeg: {e}"))?;
-    let stdout = child.stdout.take().ok_or_else(|| "no ffmpeg output".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "no ffmpeg output".to_string())?;
 
     let track = Arc::new(TrackLocalStaticSample::new(
         RTCRtpCodecCapability {

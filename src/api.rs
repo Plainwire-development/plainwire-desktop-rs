@@ -123,8 +123,6 @@ impl Api {
         Ok(serde_json::from_value(data)?)
     }
 
-    
-
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base(), path)
     }
@@ -159,6 +157,42 @@ impl Api {
         let response = self
             .http
             .post(self.url("/api/login"))
+            .json(&body)
+            .send()
+            .await?;
+        let token = find_session_cookie(response.headers());
+        let data = Self::decode(response).await?;
+        let session: Session = serde_json::from_value(data)?;
+        let token = token.ok_or_else(|| anyhow!("server did not issue a session cookie"))?;
+        *self.auth.lock().unwrap() = Some(Auth {
+            token,
+            csrf: session.csrf.clone(),
+        });
+        Ok(session)
+    }
+
+    pub async fn register(
+        &self,
+        base: &str,
+        username: &str,
+        display_name: &str,
+        password: &str,
+        email: &str,
+    ) -> Result<Session> {
+        let normalized = normalize_base(base);
+        if normalized.is_empty() {
+            bail!("server url is required");
+        }
+        *self.base.lock().unwrap() = normalized;
+        let body = json!({
+            "username": username,
+            "display_name": display_name,
+            "password": password,
+            "email": email,
+        });
+        let response = self
+            .http
+            .post(self.url("/api/register"))
             .json(&body)
             .send()
             .await?;
@@ -240,9 +274,10 @@ impl Api {
 
     pub async fn mark_conversation_read(&self, conversation_id: i64) -> Result<()> {
         let _ = self
-            .authed(self
-                .http
-                .post(self.url(&format!("/api/conversation/{conversation_id}/read"))))?
+            .authed(
+                self.http
+                    .post(self.url(&format!("/api/conversation/{conversation_id}/read"))),
+            )?
             .send()
             .await;
         Ok(())
@@ -347,7 +382,12 @@ pub fn percent_encode_component(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.as_bytes() {
         let byte = *byte;
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            )
+        {
             out.push(byte as char);
         } else {
             out.push('%');
@@ -381,7 +421,13 @@ pub fn guess_content_type(path: &std::path::Path) -> &'static str {
 pub fn safe_attachment_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if matches!(c, '\\' | ']' | '[' | '(' | ')' | '\r' | '\n') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '\\' | ']' | '[' | '(' | ')' | '\r' | '\n') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
@@ -448,7 +494,6 @@ mod tests {
 
     #[test]
     fn server_relative_media_resolves_against_the_instance() {
-
         assert_eq!(
             absolute_media_url("https://plainwi.re", "/api/media/abc"),
             "https://plainwi.re/api/media/abc"
@@ -477,17 +522,20 @@ mod tests {
     #[test]
     fn base_is_normalized_for_the_form() {
         assert_eq!(normalize_base("plainwi.re"), "https://plainwi.re");
-        assert_eq!(normalize_base("  https://plainwi.re/  "), "https://plainwi.re");
+        assert_eq!(
+            normalize_base("  https://plainwi.re/  "),
+            "https://plainwi.re"
+        );
         assert_eq!(normalize_base(""), "");
     }
 
     #[test]
     fn websocket_url_follows_the_scheme() {
+        assert_eq!(ws_url("https://plainwi.re").unwrap(), "wss://plainwi.re/ws");
         assert_eq!(
-            ws_url("https://plainwi.re").unwrap(),
-            "wss://plainwi.re/ws"
+            ws_url("http://localhost:4000").unwrap(),
+            "ws://localhost:4000/ws"
         );
-        assert_eq!(ws_url("http://localhost:4000").unwrap(), "ws://localhost:4000/ws");
     }
 
     #[test]
@@ -502,7 +550,6 @@ mod tests {
 
     #[test]
     fn fetch_image_sends_the_session_cookie() {
-
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -584,9 +631,18 @@ mod tests {
 
     #[test]
     fn content_type_is_guessed_from_the_extension() {
-        assert_eq!(guess_content_type(std::path::Path::new("a.PNG")), "image/png");
-        assert_eq!(guess_content_type(std::path::Path::new("a.jpeg")), "image/jpeg");
-        assert_eq!(guess_content_type(std::path::Path::new("a.txt")), "text/plain");
+        assert_eq!(
+            guess_content_type(std::path::Path::new("a.PNG")),
+            "image/png"
+        );
+        assert_eq!(
+            guess_content_type(std::path::Path::new("a.jpeg")),
+            "image/jpeg"
+        );
+        assert_eq!(
+            guess_content_type(std::path::Path::new("a.txt")),
+            "text/plain"
+        );
         assert_eq!(
             guess_content_type(std::path::Path::new("archive.tar.gz")),
             "application/octet-stream"
@@ -641,9 +697,15 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        assert!(runtime.block_on(api.upload_file("a.png", "image/png", vec![1, 2, 3])).is_err());
         assert!(
-            runtime.block_on(api.upload_file("a.png", "image/png", Vec::new())).is_err(),
+            runtime
+                .block_on(api.upload_file("a.png", "image/png", vec![1, 2, 3]))
+                .is_err()
+        );
+        assert!(
+            runtime
+                .block_on(api.upload_file("a.png", "image/png", Vec::new()))
+                .is_err(),
             "an empty upload must be rejected before it reaches the server"
         );
     }
@@ -720,7 +782,10 @@ mod tests {
             "wrong route: {}",
             &text[..40.min(text.len())]
         );
-        assert!(text.contains("x-file-name: my%20image.png"), "headers: {text}");
+        assert!(
+            text.contains("x-file-name: my%20image.png"),
+            "headers: {text}"
+        );
         assert!(text.contains("content-type: image/png"), "headers: {text}");
         assert!(text.contains("x-csrf-token: csrf-token"), "headers: {text}");
         assert!(text.contains("cookie: pw_session=tok"), "headers: {text}");

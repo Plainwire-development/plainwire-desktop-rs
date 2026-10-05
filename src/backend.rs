@@ -8,8 +8,8 @@ use serde_json::json;
 
 use crate::api::Api;
 use crate::model::{
-    CallInvite, Message, Participant, Profile, ProfileResponse, RoomId, RoomKind, RtcConfig,
-    ServerDetail, Session, SyncPayload, User,
+    CallInvite, Message, Notification, Participant, PresenceSnapshot, Profile, ProfileResponse,
+    RoomId, RoomKind, RtcConfig, ServerDetail, Session, SyncPayload, User,
 };
 use crate::realtime::Sub;
 use crate::realtime::{self, RtCommand};
@@ -47,6 +47,13 @@ pub enum Command {
         base: String,
         username: String,
         password: String,
+    },
+    Register {
+        base: String,
+        username: String,
+        display_name: String,
+        password: String,
+        email: String,
     },
 
     Resume {
@@ -242,6 +249,21 @@ pub enum Update {
         name: String,
         active: bool,
     },
+    Notification(Notification),
+    PresenceOnline {
+        user_id: i64,
+        status: String,
+        client_platform: String,
+    },
+    PresenceOffline {
+        user_id: i64,
+    },
+    PresenceStatus {
+        user_id: i64,
+        status: String,
+        client_platform: String,
+    },
+    PresenceState(PresenceSnapshot),
     Realtime(bool),
     LoggedOut,
     Error(String),
@@ -263,7 +285,12 @@ impl Backend {
     }
 }
 
-async fn open_sub(api: &Api, updates: &Sender<Update>, subs: &Option<watch::Sender<Option<Sub>>>, sub: Sub) {
+async fn open_sub(
+    api: &Api,
+    updates: &Sender<Update>,
+    subs: &Option<watch::Sender<Option<Sub>>>,
+    sub: Sub,
+) {
     if let Some(tx) = subs {
         let _ = tx.send(Some(sub));
     }
@@ -314,6 +341,55 @@ pub async fn run(
                 password,
             } => {
                 match api.login(&base, &username, &password).await {
+                    Ok(session) => {
+                        let _ = updates.send(Update::Session(session.clone()));
+                        if let Some(auth) = api.auth() {
+                            let server = api.base();
+                            let (out_tx, out_rx) = mpsc::unbounded_channel();
+                            let (sub_tx, sub_rx) = watch::channel(None);
+                            let relay = updates.clone();
+                            let wake = repaint.clone();
+                            tokio::spawn(realtime::run(server, auth, out_rx, sub_rx, relay, wake));
+                            outbox = Some(out_tx);
+                            subs = Some(sub_tx);
+                        }
+                        if let Some(auth) = api.auth() {
+                            let _ = updates.send(Update::SignedIn {
+                                user: session.user,
+                                token: auth.token,
+                                csrf: auth.csrf,
+                            });
+                        }
+
+                        if let Ok(config) = api.rtc_config().await {
+                            let _ = updates.send(Update::RtcConfig(config));
+                        }
+                        match api.sync().await {
+                            Ok(sync) => {
+                                let _ = updates.send(Update::Sync(sync));
+                            }
+                            Err(error) => {
+                                let _ = updates.send(Update::Error(error.to_string()));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let _ = updates.send(Update::Error(error.to_string()));
+                    }
+                }
+                repaint.request();
+            }
+            Command::Register {
+                base,
+                username,
+                display_name,
+                password,
+                email,
+            } => {
+                match api
+                    .register(&base, &username, &display_name, &password, &email)
+                    .await
+                {
                     Ok(session) => {
                         let _ = updates.send(Update::Session(session.clone()));
                         if let Some(auth) = api.auth() {
@@ -405,10 +481,7 @@ pub async fn run(
             Command::LoadServer(server_id) => {
                 match api.server_detail(server_id).await {
                     Ok(detail) => {
-                        let _ = updates.send(Update::Channels {
-                            server_id,
-                            detail,
-                        });
+                        let _ = updates.send(Update::Channels { server_id, detail });
                     }
                     Err(error) => {
                         let _ = updates.send(Update::Error(error.to_string()));
@@ -504,9 +577,8 @@ pub async fn run(
                     },
                     Err(error) => {
                         let _ = updates.send(Update::AvatarFailed { key });
-                        let _ = updates.send(Update::Status(format!(
-                            "could not load avatar: {error}"
-                        )));
+                        let _ =
+                            updates.send(Update::Status(format!("could not load avatar: {error}")));
                     }
                 }
                 repaint.request();
@@ -609,11 +681,7 @@ pub async fn run(
                 repaint.request();
             }
             Command::LeaveRoom(kind) => {
-
-                let room = RoomId {
-                    kind,
-                    id: 0,
-                };
+                let room = RoomId { kind, id: 0 };
                 if let Some(out) = &outbox {
                     let _ = out.send(RtCommand::LeaveRoom(room));
                 }

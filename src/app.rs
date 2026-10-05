@@ -10,8 +10,8 @@ use crate::account::{Account, AccountStore};
 use crate::backend::{Backend, Command, Repainter, Update};
 use crate::media::Room;
 use crate::model::{
-    CallInvite, Channel, Conversation, Message, Participant, Profile, RoomId, RoomKind, RoomPatch,
-    RtcConfig, Scope, Server, User,
+    CallInvite, Channel, Conversation, Message, Notification, Participant, Profile, RoomId,
+    RoomKind, RoomPatch, RtcConfig, Scope, Server, User,
 };
 use crate::realtime::Sub;
 use crate::tray::Tray;
@@ -43,7 +43,10 @@ impl AvatarCache {
     }
 
     fn wants(&mut self, url: &str) -> bool {
-        if url.trim().is_empty() || self.textures.contains_key(url) || self.requested.contains_key(url) {
+        if url.trim().is_empty()
+            || self.textures.contains_key(url)
+            || self.requested.contains_key(url)
+        {
             return false;
         }
         let attempts = self.attempts.entry(url.to_string()).or_insert(0);
@@ -64,7 +67,6 @@ impl AvatarCache {
 }
 
 pub struct App {
-
     rt: tokio::runtime::Handle,
     backend: Backend,
     updates: Receiver<Update>,
@@ -74,8 +76,13 @@ pub struct App {
     base: String,
     username: String,
     password: String,
+    display_name: String,
+    email: String,
+    register_mode: bool,
     busy: bool,
     accounts: AccountStore,
+    notifications: Vec<Notification>,
+    presences: HashMap<i64, String>,
 
     me: Option<User>,
     my_id: i64,
@@ -144,8 +151,13 @@ impl App {
             base,
             username,
             password: String::new(),
+            display_name: String::new(),
+            email: String::new(),
+            register_mode: false,
             busy: false,
             accounts,
+            notifications: Vec::new(),
+            presences: HashMap::new(),
             me: None,
             my_id: 0,
             servers: Vec::new(),
@@ -275,8 +287,7 @@ impl App {
                     self.messages.retain(|m| m.id != message_id);
                 }
             }
-            Update::ReactionAdded { sub, message }
-            | Update::ReactionRemoved { sub, message } => {
+            Update::ReactionAdded { sub, message } | Update::ReactionRemoved { sub, message } => {
                 if self.active == Some(sub) {
                     self.insert_message(message);
                 }
@@ -287,7 +298,6 @@ impl App {
                 }
             }
             Update::ProfileView { profile } => {
-
                 self.profile = Some(profile);
                 self.profile_loading = false;
             }
@@ -380,7 +390,6 @@ impl App {
                 self.incoming = Some(invite);
             }
             Update::CallAccepted { conversation_id } => {
-
                 if self.outgoing_call == Some(conversation_id)
                     || self.pending_join == Some(conversation_id)
                 {
@@ -442,6 +451,8 @@ impl App {
                 self.realtime = false;
                 self.avatars.clear();
                 self.profile = None;
+                self.notifications.clear();
+                self.presences.clear();
                 self.busy = false;
             }
             Update::Error(message) => {
@@ -450,6 +461,33 @@ impl App {
             }
             Update::Status(message) => {
                 self.status = message;
+            }
+            Update::Notification(notification) => {
+                self.notifications.push(notification);
+            }
+            Update::PresenceOnline {
+                user_id, status, ..
+            } => {
+                self.presences.insert(user_id, status);
+            }
+            Update::PresenceOffline { user_id } => {
+                self.presences.remove(&user_id);
+            }
+            Update::PresenceStatus {
+                user_id, status, ..
+            } => {
+                self.presences.insert(user_id, status);
+            }
+            Update::PresenceState(snapshot) => {
+                self.presences.clear();
+                for (id, status) in snapshot.statuses {
+                    self.presences.insert(id, status);
+                }
+                for id in snapshot.online {
+                    self.presences
+                        .entry(id)
+                        .or_insert_with(|| "online".to_string());
+                }
             }
         }
         self.repaint.request();
@@ -523,9 +561,7 @@ impl App {
             let handle = match Room::new(room_id, my_id, &config, sink, activity).await {
                 Ok(handle) => handle,
                 Err(error) => {
-                    backend.send(Command::Status(format!(
-                        "Voice unavailable: {error}"
-                    )));
+                    backend.send(Command::Status(format!("Voice unavailable: {error}")));
                     return;
                 }
             };
@@ -543,8 +579,7 @@ impl App {
 
     fn accept_call(&mut self, conversation_id: i64) {
         self.pending_join = Some(conversation_id);
-        self.backend
-            .send(Command::CallAccept { conversation_id });
+        self.backend.send(Command::CallAccept { conversation_id });
     }
 
     fn enter_call(&mut self, conversation_id: i64) {
@@ -603,7 +638,6 @@ impl App {
         self.reset_room_state();
         let backend = self.backend.clone();
         if let Some(handle) = taken {
-
             let kind = handle.id.kind;
             self.rt.spawn(async move {
                 handle.shutdown().await;
@@ -612,14 +646,28 @@ impl App {
         }
     }
 
+    fn toggle_register(&mut self) {
+        self.register_mode = !self.register_mode;
+    }
+
     fn connect(&mut self) {
         self.busy = true;
         self.error = None;
-        self.backend.send(Command::Login {
-            base: self.base.clone(),
-            username: self.username.clone(),
-            password: self.password.clone(),
-        });
+        if self.register_mode {
+            self.backend.send(Command::Register {
+                base: self.base.clone(),
+                username: self.username.clone(),
+                display_name: self.display_name.clone(),
+                password: self.password.clone(),
+                email: self.email.clone(),
+            });
+        } else {
+            self.backend.send(Command::Login {
+                base: self.base.clone(),
+                username: self.username.clone(),
+                password: self.password.clone(),
+            });
+        }
     }
 
     fn switch_account(&mut self, index: usize) {
@@ -641,7 +689,6 @@ impl App {
                 });
             }
             _ => {
-
                 self.password = account.password.clone();
                 if self.password.is_empty() {
                     self.busy = false;
@@ -661,7 +708,14 @@ impl App {
         let _ = self.accounts.save();
     }
 
-    fn remember(&mut self, base: String, password: String, user: User, token: String, csrf: String) {
+    fn remember(
+        &mut self,
+        base: String,
+        password: String,
+        user: User,
+        token: String,
+        csrf: String,
+    ) {
         let account = Account {
             base,
             username: user.username.clone(),
@@ -737,14 +791,12 @@ impl App {
                     .or_else(|| std::env::current_dir().ok())
             })
             .and_then(|dir| {
-                fs::read_dir(dir)
-                    .ok()
-                    .and_then(|mut entries| {
-                        entries
-                            .next()
-                            .map(|e| e.ok())
-                            .and_then(|e| e.map(|e| e.path()))
-                    })
+                fs::read_dir(dir).ok().and_then(|mut entries| {
+                    entries
+                        .next()
+                        .map(|e| e.ok())
+                        .and_then(|e| e.map(|e| e.path()))
+                })
             });
         self.tray = Some(Tray::new(icon_path));
         if let Some(ref mut tray) = self.tray {
@@ -799,18 +851,12 @@ impl App {
             None => self.avatar_placeholder(ui),
         }
     }
-
-    fn avatar_placeholder(&self, ui: &mut egui::Ui) {
+    fn avatar_placeholder(&mut self, ui: &mut egui::Ui) {
         let size = IMAGE_BOX;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         ui.painter()
             .circle_filled(rect.center(), size / 2.0, Color32::from_rgb(70, 74, 86));
-        let initials = initials_of(
-            self.me
-                .as_ref()
-                .map(|u| u.label())
-                .unwrap_or_default(),
-        );
+        let initials = initials_of(self.me.as_ref().map(|u| u.label()).unwrap_or_default());
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -818,6 +864,22 @@ impl App {
             egui::FontId::proportional(size * 0.4),
             Color32::from_rgb(225, 228, 235),
         );
+    }
+
+    fn presence_dot(&self, ui: &mut egui::Ui, user_id: i64) {
+        match self.presences.get(&user_id) {
+            Some(status) if !status.is_empty() => {
+                let color = presence_color(status);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 4.0, color);
+                ui.label(RichText::new(status.as_str()).small().weak());
+            }
+            _ => {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(rect.center(), 4.0, Color32::from_rgb(80, 84, 96));
+            }
+        }
     }
 }
 
@@ -841,7 +903,10 @@ pub fn fit_attachment_size(width: usize, height: usize, max_edge: f32) -> egui::
     }
     let longest = width.max(height) as f32;
     let scale = (max_edge / longest).min(1.0);
-    egui::vec2((width as f32 * scale).max(1.0), (height as f32 * scale).max(1.0))
+    egui::vec2(
+        (width as f32 * scale).max(1.0),
+        (height as f32 * scale).max(1.0),
+    )
 }
 
 fn composer_edit(text: &mut String) -> egui::TextEdit<'_> {
@@ -852,7 +917,8 @@ fn composer_edit(text: &mut String) -> egui::TextEdit<'_> {
 }
 
 pub fn composer_width(available: f32, item_spacing: f32) -> f32 {
-    (available - SEND_BUTTON_WIDTH - ATTACH_BUTTON_WIDTH - item_spacing * 2.0).max(MIN_COMPOSER_WIDTH)
+    (available - SEND_BUTTON_WIDTH - ATTACH_BUTTON_WIDTH - item_spacing * 2.0)
+        .max(MIN_COMPOSER_WIDTH)
 }
 
 pub fn paste_shortcut(modifiers: egui::Modifiers, v_pressed: bool) -> bool {
@@ -927,8 +993,8 @@ pub fn path_from_clipboard_text(text: &str) -> Option<std::path::PathBuf> {
 }
 
 fn clipboard_attachment() -> Result<ClipAttachment, String> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|error| format!("cannot open the clipboard: {error}"))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("cannot open the clipboard: {error}"))?;
     if let Ok(data) = clipboard.get_image() {
         let rgba = image::RgbaImage::from_raw(
             data.width as u32,
@@ -962,7 +1028,11 @@ fn initials_of(name: &str) -> String {
     let text = match parts.len() {
         0 => "?".to_string(),
         1 => parts[0].chars().take(2).collect::<String>(),
-        _ => parts.iter().take(2).filter_map(|p| p.chars().next()).collect(),
+        _ => parts
+            .iter()
+            .take(2)
+            .filter_map(|p| p.chars().next())
+            .collect(),
     };
     text.to_uppercase()
 }
@@ -1037,15 +1107,11 @@ impl App {
                             let accounts = self.accounts.accounts.clone();
                             for (index, account) in accounts.iter().enumerate() {
                                 ui.horizontal(|ui| {
-                                    let selected =
-                                        self.accounts.selected == Some(index);
+                                    let selected = self.accounts.selected == Some(index);
                                     let label = if account.display_name.is_empty() {
                                         account.username.clone()
                                     } else {
-                                        format!(
-                                            "{} (@{})",
-                                            account.display_name, account.username
-                                        )
+                                        format!("{} (@{})", account.display_name, account.username)
                                     };
                                     if ui
                                         .selectable_label(selected, label)
@@ -1068,6 +1134,20 @@ impl App {
                             ui.add_space(8.0);
                         }
 
+                        if self.register_mode {
+                            ui.label("Display name");
+                            ui.add_sized(
+                                [width, 28.0],
+                                egui::TextEdit::singleline(&mut self.display_name),
+                            );
+                            ui.add_space(8.0);
+                            ui.label("Email");
+                            ui.add_sized(
+                                [width, 28.0],
+                                egui::TextEdit::singleline(&mut self.email),
+                            );
+                            ui.add_space(8.0);
+                        }
                         ui.label("Server");
                         ui.add_sized(
                             [width, 28.0],
@@ -1087,11 +1167,23 @@ impl App {
                             egui::TextEdit::singleline(&mut self.password).password(true),
                         );
                         ui.add_space(16.0);
+                        ui.horizontal(|ui| {
+                            let toggle_label = if self.register_mode {
+                                "Login"
+                            } else {
+                                "Register"
+                            };
+                            if ui.small_button(toggle_label).clicked() {
+                                self.toggle_register();
+                            }
+                        });
                         let enabled = !self.busy;
                         let button = ui.add_enabled(
                             enabled,
                             egui::Button::new(if self.busy {
                                 "Connecting…"
+                            } else if self.register_mode {
+                                "Register"
                             } else {
                                 "Connect"
                             })
@@ -1114,29 +1206,35 @@ impl App {
     fn draw_sidebar(&mut self, root: &mut egui::Ui) {
         let mut actions: Vec<SidebarAction> = Vec::new();
         let my_id = self.my_id;
-        let my_label = self.me.as_ref().map(|u| u.label().to_string()).unwrap_or_default();
-        let my_avatar = self.me.as_ref().map(|u| u.avatar_url.clone()).unwrap_or_default();
+        let my_label = self
+            .me
+            .as_ref()
+            .map(|u| u.label().to_string())
+            .unwrap_or_default();
+        let my_avatar = self
+            .me
+            .as_ref()
+            .map(|u| u.avatar_url.clone())
+            .unwrap_or_default();
 
         egui::Panel::left("navigation")
             .resizable(true)
             .default_size(262.0)
             .show(root, |ui| {
                 ui.add_space(6.0);
-                egui::Frame::group(ui.style()).inner_margin(8.0).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        self.avatar(ui, &my_avatar, 32.0);
-                        ui.vertical(|ui| {
-                            ui.label(RichText::new(&my_label).strong());
-                            ui.label(
-                                RichText::new(self.instance_label())
-                                    .small()
-                                    .weak(),
-                            );
+                egui::Frame::group(ui.style())
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            self.avatar(ui, &my_avatar, 32.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(&my_label).strong());
+                                ui.label(RichText::new(self.instance_label()).small().weak());
+                            });
                         });
+                        ui.add_space(6.0);
+                        self.account_menu(ui, my_id, &mut actions);
                     });
-                    ui.add_space(6.0);
-                    self.account_menu(ui, my_id, &mut actions);
-                });
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1155,13 +1253,9 @@ impl App {
                         ui.label(RichText::new("Channels").small().weak());
                         for channel in channels {
                             if channel.is_voice() {
-                                let joined =
-                                    self.current_room() == Some(RoomId::voice(channel.id));
+                                let joined = self.current_room() == Some(RoomId::voice(channel.id));
                                 if ui
-                                    .selectable_label(
-                                        joined,
-                                        format!("🔊 {}", channel.name),
-                                    )
+                                    .selectable_label(joined, format!("🔊 {}", channel.name))
                                     .on_hover_text("Click to join or leave")
                                     .clicked()
                                 {
@@ -1208,6 +1302,7 @@ impl App {
                         }
                         let avatar = conversation.avatar().to_string();
                         let in_call = self.current_room() == Some(RoomId::call(conversation.id));
+                        let peer_id = conversation.peer_id;
                         ui.horizontal(|ui| {
                             if ui.selectable_label(selected, text).clicked() {
                                 actions.push(SidebarAction::OpenSub(
@@ -1219,6 +1314,7 @@ impl App {
                                 ));
                             }
                             self.avatar(ui, &avatar, 18.0);
+                            self.presence_dot(ui, peer_id);
                             let label = if in_call { "⏹" } else { "📞" };
                             if ui
                                 .small_button(label)
@@ -1238,6 +1334,33 @@ impl App {
                         });
                     }
 
+                    if !self.notifications.is_empty() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Notifications").small().weak());
+                        let notifs = self.notifications.clone();
+                        for n in notifs.iter().rev().take(10) {
+                            let who = if n.event == "friend_request" {
+                                n.from_user_id
+                            } else {
+                                n.user_id
+                            };
+                            let text = match n.event.as_str() {
+                                "friend_request" => format!("User #{} sent a friend request", who),
+                                "friend_accept" => {
+                                    format!("User #{} accepted your friend request", who)
+                                }
+                                other => format!("Notification: {}", other),
+                            };
+                            ui.label(RichText::new(text).small());
+                        }
+                        if notifs.len() > 10 {
+                            ui.label(
+                                RichText::new(format!("+ {} more", notifs.len() - 10))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.selectable_label(self.people_open, "👥 People").clicked() {
@@ -1278,11 +1401,7 @@ impl App {
                 }
                 for (index, account) in accounts.iter().enumerate() {
                     let mark = if Some(index) == current { "● " } else { "" };
-                    let label = format!(
-                        "{mark}{} — {}",
-                        account.label(),
-                        account.base
-                    );
+                    let label = format!("{mark}{} — {}", account.label(), account.base);
                     if ui
                         .selectable_label(Some(index) == selection, label)
                         .clicked()
@@ -1349,7 +1468,6 @@ impl App {
             }
             SidebarAction::SignOut => self.backend.send(Command::Logout),
             SidebarAction::AddAccount => {
-
                 if self.me.is_some() {
                     let base = self.base.clone();
                     let user = self.me.clone().unwrap();
@@ -1401,8 +1519,10 @@ impl App {
                 let results = self.user_results.clone();
                 for user in results {
                     let avatar = user.avatar_url.clone();
+                    let user_id = user.id;
                     ui.horizontal(|ui| {
                         self.avatar(ui, &avatar, 26.0);
+                        self.presence_dot(ui, user_id);
                         if ui
                             .selectable_label(false, user.label().to_string())
                             .on_hover_text(format!("@{}", user.username))
@@ -1463,10 +1583,7 @@ impl App {
             ui.label(RichText::new(profile.user.label()).strong().size(22.0));
             ui.label(RichText::new(format!("@{}", profile.user.username)).weak());
             if !profile.user.bio.is_empty() {
-                ui.add(
-                    egui::Label::new(RichText::new(&profile.user.bio))
-                        .wrap(),
-                );
+                ui.add(egui::Label::new(RichText::new(&profile.user.bio)).wrap());
             }
             ui.add_space(6.0);
             ui.label(
@@ -1484,12 +1601,9 @@ impl App {
             );
             if !profile.relationship.is_empty() {
                 ui.label(
-                    RichText::new(format!(
-                        "Relationship: {}",
-                        profile.relationship.describe()
-                    ))
-                    .weak()
-                    .small(),
+                    RichText::new(format!("Relationship: {}", profile.relationship.describe()))
+                        .weak()
+                        .small(),
                 );
             }
             if profile.user.id == self.my_id {
@@ -1591,7 +1705,10 @@ impl App {
             let mut attach = false;
             ui.horizontal(|ui| {
                 let response = ui.add_sized(
-                    [composer_width(ui.available_width(), ui.spacing().item_spacing.x), composer_height],
+                    [
+                        composer_width(ui.available_width(), ui.spacing().item_spacing.x),
+                        composer_height,
+                    ],
                     composer_edit(&mut self.composer),
                 );
                 self.composer_ready = response.has_focus();
@@ -1616,7 +1733,8 @@ impl App {
                         egui::Button::new("Send"),
                     )
                     .clicked();
-                if (clicked || composer_enter_requested(ui, &response)) && !self.composer.trim().is_empty()
+                if (clicked || composer_enter_requested(ui, &response))
+                    && !self.composer.trim().is_empty()
                 {
                     send = true;
                 }
@@ -1626,7 +1744,9 @@ impl App {
             }
             if self.uploading > 0 {
                 ui.label(
-                    RichText::new(format!("attaching {}…", self.uploading)).small().weak(),
+                    RichText::new(format!("attaching {}…", self.uploading))
+                        .small()
+                        .weak(),
                 );
             }
         });
@@ -1804,7 +1924,11 @@ impl App {
             if message.is_bot {
                 ui.label(RichText::new("BOT").small().weak());
             }
-            ui.label(RichText::new(format_time(message.created_at)).small().weak());
+            ui.label(
+                RichText::new(format_time(message.created_at))
+                    .small()
+                    .weak(),
+            );
             if message.edited_at.is_some() {
                 ui.label(RichText::new("(edited)").small().weak());
             }
@@ -1817,10 +1941,10 @@ impl App {
         }
         if let Some(image_url) = message.image_url.clone() {
             let image = self.avatar_texture(&image_url);
-            match image {Some(texture) => {
+            match image {
+                Some(texture) => {
                     let size = texture.size();
-                    let target =
-                        fit_attachment_size(size[0], size[1], ATTACHMENT_MAX_EDGE);
+                    let target = fit_attachment_size(size[0], size[1], ATTACHMENT_MAX_EDGE);
                     ui.add(egui::Image::new(&texture).fit_to_exact_size(target));
                 }
                 None => {
@@ -1888,61 +2012,61 @@ impl App {
         .resizable(false)
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                for participant in &roster {
-                    let is_me = participant.user_id == my_id;
-                    let label = if is_me {
-                        format!("{} (you)", participant.profile.label())
-                    } else {
-                        participant.profile.label().to_string()
-                    };
-                    let mut marks = Vec::new();
-                    if participant.muted {
-                        marks.push("🔇");
-                    }
-                    if participant.deafened {
-                        marks.push("🎧");
-                    }
-                    if participant.screen {
-                        marks.push("🖥");
-                    }
-                    if speaking.get(&participant.user_id).copied().unwrap_or(false) {
-                        marks.push("🔊");
-                    }
-                    let avatar = participant.profile.avatar_url.clone();
-                    let link = snapshot.links.get(&participant.user_id);
-                    let link_note = match link {
-                        Some(crate::media::PeerLink::Connected) => String::new(),
-                        Some(crate::media::PeerLink::Connecting) => {
-                            "connecting".to_string()
-                        }
-                        Some(crate::media::PeerLink::Failed(reason)) => {
-                            format!("connection failed: {reason}")
-                        }
-                        Some(crate::media::PeerLink::Closed) => "disconnected".to_string(),
-                        None => String::new(),
-                    };
-                    ui.horizontal(|ui| {
-                        self.avatar(ui, &avatar, 22.0);
-                        let text = if link_note.is_empty() {
-                            label
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for participant in &roster {
+                        let is_me = participant.user_id == my_id;
+                        let label = if is_me {
+                            format!("{} (you)", participant.profile.label())
                         } else {
-                            format!("{label} ({link_note})")
+                            participant.profile.label().to_string()
                         };
-                        if link_note.is_empty() {
-                            ui.label(text);
-                        } else {
-                            ui.label(RichText::new(text).weak());
+                        let mut marks = Vec::new();
+                        if participant.muted {
+                            marks.push("🔇");
                         }
-                        if !marks.is_empty() {
-                            ui.label(RichText::new(marks.join(" ")).small());
+                        if participant.deafened {
+                            marks.push("🎧");
                         }
-                    });
-                }
-                if roster.is_empty() {
-                    ui.label(RichText::new("Waiting for others to join…").weak());
-                }
-            });
+                        if participant.screen {
+                            marks.push("🖥");
+                        }
+                        if speaking.get(&participant.user_id).copied().unwrap_or(false) {
+                            marks.push("🔊");
+                        }
+                        let avatar = participant.profile.avatar_url.clone();
+                        let link = snapshot.links.get(&participant.user_id);
+                        let link_note = match link {
+                            Some(crate::media::PeerLink::Connected) => String::new(),
+                            Some(crate::media::PeerLink::Connecting) => "connecting".to_string(),
+                            Some(crate::media::PeerLink::Failed(reason)) => {
+                                format!("connection failed: {reason}")
+                            }
+                            Some(crate::media::PeerLink::Closed) => "disconnected".to_string(),
+                            None => String::new(),
+                        };
+                        ui.horizontal(|ui| {
+                            self.avatar(ui, &avatar, 22.0);
+                            let text = if link_note.is_empty() {
+                                label
+                            } else {
+                                format!("{label} ({link_note})")
+                            };
+                            if link_note.is_empty() {
+                                ui.label(text);
+                            } else {
+                                ui.label(RichText::new(text).weak());
+                            }
+                            if !marks.is_empty() {
+                                ui.label(RichText::new(marks.join(" ")).small());
+                            }
+                        });
+                    }
+                    if roster.is_empty() {
+                        ui.label(RichText::new("Waiting for others to join…").weak());
+                    }
+                });
             ui.separator();
             if let Some(error) = &snapshot.capture_error {
                 ui.colored_label(Color32::from_rgb(230, 110, 110), error);
@@ -1969,7 +2093,11 @@ impl App {
                 if ui
                     .selectable_label(
                         deafened,
-                        if deafened { "🎧 Deafened" } else { "🎧 Deafen" },
+                        if deafened {
+                            "🎧 Deafened"
+                        } else {
+                            "🎧 Deafen"
+                        },
                     )
                     .clicked()
                 {
@@ -1978,7 +2106,11 @@ impl App {
                 if ui
                     .selectable_label(
                         sharing,
-                        if sharing { "🖥 Stop share" } else { "🖥 Share" },
+                        if sharing {
+                            "🖥 Stop share"
+                        } else {
+                            "🖥 Share"
+                        },
                     )
                     .on_hover_text("Share your screen with everyone in this room")
                     .clicked()
@@ -2003,22 +2135,17 @@ impl App {
                 let patch = RoomPatch::new(room.id.kind)
                     .muted(self.muted)
                     .deafened(self.deafened);
-                self.backend.send(Command::PatchRoom {
-                    patch,
-                });
+                self.backend.send(Command::PatchRoom { patch });
             }
             VoiceAction::ToggleDeafen => {
                 self.deafened = !self.deafened;
                 if self.deafened {
-
                     self.muted = true;
                 }
                 let patch = RoomPatch::new(room.id.kind)
                     .muted(self.muted)
                     .deafened(self.deafened);
-                self.backend.send(Command::PatchRoom {
-                    patch,
-                });
+                self.backend.send(Command::PatchRoom { patch });
             }
             VoiceAction::ToggleShare => {
                 let handle = room.clone();
@@ -2027,9 +2154,7 @@ impl App {
                 });
                 self.sharing = !self.sharing;
                 let patch = RoomPatch::new(room.id.kind).screen(self.sharing);
-                self.backend.send(Command::PatchRoom {
-                    patch,
-                });
+                self.backend.send(Command::PatchRoom { patch });
             }
             VoiceAction::Leave => {
                 let id = room.id;
@@ -2077,6 +2202,15 @@ impl App {
             self.incoming = None;
             self.backend.send(Command::CallDecline { conversation_id });
         }
+    }
+}
+
+fn presence_color(status: &str) -> Color32 {
+    match status {
+        "online" => Color32::from_rgb(82, 217, 82),
+        "idle" | "busy" => Color32::from_rgb(255, 193, 7),
+        "dnd" => Color32::from_rgb(230, 90, 90),
+        _ => Color32::from_rgb(80, 84, 96),
     }
 }
 
@@ -2131,9 +2265,7 @@ mod tests {
     fn images_are_always_drawn_in_the_fixed_box() {
         assert_eq!(IMAGE_BOX, 20.0);
 
-        let solid = |w: usize, h: usize| {
-            egui::ColorImage::new([w, h], vec![Color32::GRAY; w * h])
-        };
+        let solid = |w: usize, h: usize| egui::ColorImage::new([w, h], vec![Color32::GRAY; w * h]);
         let ctx = egui::Context::default();
 
         let big = ctx.load_texture("big", solid(2048, 1024), egui::TextureOptions::LINEAR);
@@ -2145,10 +2277,7 @@ mod tests {
     }
 
     fn enter_seen_by_composer(use_composer_edit: bool) -> bool {
-        fn edit<'a>(
-            text: &'a mut String,
-            use_composer_edit: bool,
-        ) -> egui::TextEdit<'a> {
+        fn edit<'a>(text: &'a mut String, use_composer_edit: bool) -> egui::TextEdit<'a> {
             if use_composer_edit {
                 composer_edit(text)
             } else {
@@ -2329,11 +2458,13 @@ mod tests {
             *out = Some(
                 ui.horizontal(|ui| {
                     ui.add_sized(
-                        [composer_width(ui.available_width(), ui.spacing().item_spacing.x), 30.0],
+                        [
+                            composer_width(ui.available_width(), ui.spacing().item_spacing.x),
+                            30.0,
+                        ],
                         composer_edit(&mut composer),
                     );
-                    let attach =
-                        ui.add_sized([ATTACH_BUTTON_WIDTH, 30.0], egui::Button::new("📎"));
+                    let attach = ui.add_sized([ATTACH_BUTTON_WIDTH, 30.0], egui::Button::new("📎"));
                     ui.add_sized([SEND_BUTTON_WIDTH, 30.0], egui::Button::new("Send"));
                     attach
                 })
@@ -2366,7 +2497,9 @@ mod tests {
             click.focused = true;
             click.screen_rect = Some(screen);
             click.viewport_id = egui::ViewportId::ROOT;
-            click.events.push(egui::Event::PointerMoved(attach_rect.center()));
+            click
+                .events
+                .push(egui::Event::PointerMoved(attach_rect.center()));
             click.events.push(egui::Event::PointerButton {
                 pos: attach_rect.center(),
                 button: egui::PointerButton::Primary,
@@ -2402,9 +2535,16 @@ mod tests {
     fn attachments_are_large_enough_to_actually_see() {
         assert!(ATTACHMENT_MAX_EDGE >= 120.0);
         let small = fit_attachment_size(64, 64, ATTACHMENT_MAX_EDGE);
-        assert_eq!(small, egui::vec2(64.0, 64.0), "small images are not upscaled");
+        assert_eq!(
+            small,
+            egui::vec2(64.0, 64.0),
+            "small images are not upscaled"
+        );
         let huge = fit_attachment_size(4000, 3000, ATTACHMENT_MAX_EDGE);
-        assert_eq!(huge, egui::vec2(ATTACHMENT_MAX_EDGE, ATTACHMENT_MAX_EDGE * 0.75));
+        assert_eq!(
+            huge,
+            egui::vec2(ATTACHMENT_MAX_EDGE, ATTACHMENT_MAX_EDGE * 0.75)
+        );
         let tall = fit_attachment_size(300, 1200, ATTACHMENT_MAX_EDGE);
         assert_eq!(tall.x < tall.y, true, "aspect ratio is preserved");
         assert!(tall.x <= ATTACHMENT_MAX_EDGE && tall.y <= ATTACHMENT_MAX_EDGE);
@@ -2469,8 +2609,7 @@ mod tests {
         let markup =
             crate::api::attachment_markup(&uploaded.name, &uploaded.content_type, &uploaded.url);
         assert_eq!(
-            markup,
-            "![image.png](/api/files/4lnbEp-b7NTbZqMxHi38pfFWin5THA4R)",
+            markup, "![image.png](/api/files/4lnbEp-b7NTbZqMxHi38pfFWin5THA4R)",
             "the composer shows the same markdown the web client inserts"
         );
 
@@ -2488,7 +2627,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn attachment_markup_is_appended_without_breaking_it() {
         let mut composer = String::new();
@@ -2517,7 +2655,9 @@ mod tests {
             "a stray percent must not be dropped"
         );
         assert_eq!(
-            percent_decode_component(&crate::api::percent_encode_component("h\u{e9}llo w\u{f6}rld.png")),
+            percent_decode_component(&crate::api::percent_encode_component(
+                "h\u{e9}llo w\u{f6}rld.png"
+            )),
             "h\u{e9}llo w\u{f6}rld.png",
             "encoding then decoding must round trip"
         );
